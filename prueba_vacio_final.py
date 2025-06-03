@@ -1,0 +1,604 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import pandas as pd
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_pdf import PdfPages
+import datetime
+import os
+import math  # Para cálculo de columnas de leyenda
+import configparser # Import for reading config file
+import sys # Necesario para la resolución de rutas en ejecutables
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        root.title("Control de Bombas - Intervalo Configurable con Fecha Completa")
+
+        # --- NUEVO: título interno -------------------------------------------------
+        header = ttk.Label(
+            root,
+            text="Test_vacio",
+            font=("Helvetica", 14, "bold")   # tamaño y negrita (ajusta a tu gusto)
+        )
+        header.pack(pady=(8, 145))              # margen superior e inferior
+
+        self.output_dir = os.path.join(os.path.expanduser("~"), "Desktop", "puntoexe_output") 
+        self.interval_minutes = 5
+        self.tolerance = 50
+        self.config_file_path = "config.txt" 
+
+        self.load_config()
+
+        if not os.path.exists(self.output_dir):
+            try:
+                os.makedirs(self.output_dir)
+            except Exception as e:
+                messagebox.showerror("Error al crear directorio",
+                                     f"No se pudo crear el directorio de salida: {self.output_dir}\nError: {e}\n"
+                                     f"Por favor, cree el directorio manualmente o revise los permisos.\n"
+                                     f"Usando directorio por defecto de emergencia: {os.path.join(os.path.expanduser('~'), 'Desktop', 'puntoexe_output_emergency')}")
+                self.output_dir = os.path.join(os.path.expanduser("~"), "Desktop", "puntoexe_output_emergency")
+                if not os.path.exists(self.output_dir): 
+                    try:
+                        os.makedirs(self.output_dir, exist_ok=True)
+                    except Exception as e_emerg:
+                         messagebox.showerror("Error Crítico", f"No se pudo crear el directorio de salida de emergencia: {e_emerg}")
+                         self.root.destroy() 
+                         return
+
+        self.filepath = None
+        self.txt_basename = None 
+        self.output_pdf_path = None 
+        self.output_csv_path = os.path.join(self.output_dir, "acumulado_intervalos.csv")
+
+        select_btn = ttk.Button(root, text="Seleccionar TXT...", command=self.seleccionar_txt)
+        select_btn.pack(padx=10, pady=5, anchor='w')
+
+        fm = ttk.LabelFrame(root, text="Fecha y hora de inicio de intervalo")
+        fm.pack(padx=10, pady=5, fill='x')
+        ttk.Label(fm, text="Día:").grid(row=0, column=0, padx=3, pady=3)
+        self.day_entry = ttk.Entry(fm, width=5)
+        self.day_entry.grid(row=0, column=1, padx=3, pady=3)
+        ttk.Label(fm, text="Mes:").grid(row=0, column=2, padx=3, pady=3)
+        self.month_entry = ttk.Entry(fm, width=5)
+        self.month_entry.grid(row=0, column=3, padx=3, pady=3)
+        ttk.Label(fm, text="Año:").grid(row=0, column=4, padx=3, pady=3)
+        self.year_entry = ttk.Entry(fm, width=7)
+        self.year_entry.grid(row=0, column=5, padx=3, pady=3)
+        ttk.Label(fm, text="Hora (0-23):").grid(row=1, column=0, padx=3, pady=3)
+        self.hora_entry = ttk.Entry(fm, width=5)
+        self.hora_entry.grid(row=1, column=1, padx=3, pady=3)
+        ttk.Label(fm, text="Minuto (0-59):").grid(row=1, column=2, padx=3, pady=3)
+        self.min_entry = ttk.Entry(fm, width=5)
+        self.min_entry.grid(row=1, column=3, padx=3, pady=3)
+
+        btn_text = f"Graficar {self.interval_minutes} minutos"
+        self.plot_button = ttk.Button(root, text=btn_text, command=self.procesar_intervalo) 
+        self.plot_button.pack(padx=10, pady=10)
+
+
+    def load_config(self):
+        config = configparser.ConfigParser()
+        
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            application_path = os.path.dirname(sys.executable)
+        else:
+            application_path = os.path.dirname(os.path.abspath(__file__))
+        
+        config_file_alongside_app = os.path.join(application_path, "config.txt")
+        
+        used_config_path = None
+        if os.path.exists(config_file_alongside_app):
+            used_config_path = config_file_alongside_app
+        elif os.path.exists(self.config_file_path): 
+             if not os.path.isabs(self.config_file_path):
+                 resolved_self_config_path = os.path.join(application_path, self.config_file_path)
+                 if os.path.exists(resolved_self_config_path):
+                     used_config_path = resolved_self_config_path
+             else: 
+                if os.path.exists(self.config_file_path): 
+                    used_config_path = self.config_file_path
+
+        if not used_config_path:
+            messagebox.showwarning("Configuración no encontrada",
+                                   f"No se encontró 'config.txt' junto a la aplicación ni en la ruta especificada.\n"
+                                   f"Se usarán los valores por defecto para directorio de salida, intervalo y tolerancia.")
+            return 
+
+        try:
+            config.read(used_config_path)
+            if 'DEFAULT' in config:
+                default_config = config['DEFAULT']
+                output_dir_from_config = default_config.get('output_dir', self.output_dir).strip()
+                if output_dir_from_config: 
+                    self.output_dir = output_dir_from_config
+                    if not os.path.isabs(self.output_dir):
+                        self.output_dir = os.path.join(application_path, self.output_dir)
+
+                # Leer valores y eliminar comentarios inline
+                interval_str = default_config.get('interval_minutes', str(self.interval_minutes))
+                self.interval_minutes = int(interval_str.split('#')[0].strip())
+                
+                tolerance_str = default_config.get('tolerance', str(self.tolerance))
+                self.tolerance = float(tolerance_str.split('#')[0].strip())
+                
+                print(f"Configuración cargada desde {used_config_path}:")
+                print(f"  Output dir: {self.output_dir}")
+                print(f"  Interval minutes: {self.interval_minutes}")
+                print(f"  Tolerance: {self.tolerance}")
+            else:
+                messagebox.showwarning("Sección no encontrada",
+                                   f"No se encontró la sección [DEFAULT] en '{used_config_path}'.\n"
+                                   f"Se usarán los valores por defecto para directorio de salida, intervalo y tolerancia.")
+        except ValueError as ve: # Capturar error específico si la conversión a int/float falla
+            messagebox.showerror("Error de Valor en config.txt",
+                                 f"Error al convertir un valor en '{used_config_path}': {ve}\n"
+                                 f"Asegúrese que 'interval_minutes' y 'tolerance' sean números válidos y que los comentarios estén en líneas separadas.\n"
+                                 f"Se usarán los valores por defecto.")
+        except Exception as e:
+            messagebox.showerror("Error al leer config.txt",
+                                 f"Error al leer '{used_config_path}': {e}\nSe usarán los valores por defecto para directorio de salida, intervalo y tolerancia.")
+        finally:
+            self.output_csv_path = os.path.join(self.output_dir, "acumulado_intervalos.csv")
+            if hasattr(self, 'plot_button'): 
+                self.plot_button.config(text=f"Graficar {self.interval_minutes} minutos")
+
+
+    def seleccionar_txt(self):
+        path = filedialog.askopenfilename(
+            title="Seleccionar archivo TXT",
+            filetypes=[("Archivos de texto", "*.txt"), ("Todos los archivos", "*.*")]
+        )
+        if path:
+            self.filepath = path
+            self.txt_basename = os.path.splitext(os.path.basename(path))[0] 
+
+            messagebox.showinfo(
+                "TXT seleccionado",
+                f"Archivo: {os.path.basename(path)}\n"
+                f"Directorio de salida: {self.output_dir}\n"
+                "El programa te preguntará dónde guardar el PDF cuando lo generes.\n"
+                f"CSV de salida: {os.path.basename(self.output_csv_path)}"
+            )
+
+    def procesar_intervalo(self):
+        if not self.filepath or not os.path.isfile(self.filepath) or not self.txt_basename:
+            messagebox.showerror("Error", "Debes seleccionar un archivo TXT primero.")
+            return
+
+        df = self.leer_datos_txt(self.filepath)
+        if df is None or df.empty:
+            return
+
+        d, mo, y = self.day_entry.get().strip(), self.month_entry.get().strip(), self.year_entry.get().strip()
+        h, m = self.hora_entry.get().strip(), self.min_entry.get().strip()
+        if not all([d.isdigit(), mo.isdigit(), y.isdigit(), h.isdigit(), m.isdigit()]):
+            messagebox.showerror("Entrada inválida", "Introduce valores numéricos para fecha y hora.")
+            return
+        try:
+            start_dt_input = datetime.datetime(int(y), int(mo), int(d), int(h), int(m))
+        except ValueError:
+            messagebox.showerror("Fecha inválida", "La fecha y hora introducidas no son válidas.")
+            return
+
+        df_sorted = df.sort_index()
+        mask = df_sorted.index >= start_dt_input
+        if not mask.any():
+            messagebox.showinfo("Sin datos", f"No hay registros desde {start_dt_input.strftime('%Y-%m-%d %H:%M')} en adelante.")
+            return
+
+        actual_start_dt = df_sorted.index[mask][0]
+        end_dt = actual_start_dt + datetime.timedelta(minutes=self.interval_minutes)
+        data_interval = df_sorted.loc[actual_start_dt:end_dt]
+
+        if data_interval.empty:
+            messagebox.showinfo("Sin datos", f"No hay datos en el intervalo de {self.interval_minutes} minutos desde {actual_start_dt.strftime('%Y-%m-%d %H:%M')}.")
+            return
+
+        """generation_time_str = datetime.datetime.now().strftime("_%Y%m%d_%H%M%S")
+        pdf_filename = f"test_{self.txt_basename}{generation_time_str}.pdf"
+        self.output_pdf_path = os.path.join(self.output_dir, pdf_filename)"""
+        generation_time_str = datetime.datetime.now().strftime("_%Y%m%d_%H%M%S")
+        pdf_default_name    = f"test_{self.txt_basename}{generation_time_str}.pdf"
+
+        pdf_path = filedialog.asksaveasfilename(
+            title="Guardar PDF como...",
+            defaultextension=".pdf",
+            initialfile=pdf_default_name,
+            filetypes=[("PDF files", "*.pdf")],
+        )
+
+        if not pdf_path:      # El usuario pulsó “Cancelar”
+            messagebox.showinfo("Cancelado", "Generación de PDF cancelada por el usuario.")
+            return
+
+        self.output_pdf_path = pdf_path
+
+        self.mostrar_grafico(data_interval, actual_start_dt, end_dt)
+        self.generar_pdf(data_interval, actual_start_dt, end_dt) 
+        self.guardar_csv(data_interval)
+
+    def leer_datos_txt(self, filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = [l for l in f if l.strip()]
+            if not lines:
+                messagebox.showerror("Error al leer", f"El archivo TXT '{os.path.basename(filepath)}' está vacío o no contiene datos válidos.")
+                return None
+            header = lines[0].strip().split('\t')
+            n = len(header)
+            if n == 0:
+                messagebox.showerror("Error al leer", f"El encabezado del archivo TXT '{os.path.basename(filepath)}' está vacío.")
+                return None
+            
+            rows = []
+            parse_warnings = []
+            for l_idx, l in enumerate(lines[1:], start=2): 
+                parts = l.strip().split('\t')
+                if len(parts) == 0: 
+                    continue
+                if len(parts) != n : 
+                     parse_warnings.append(f"Línea {l_idx}: {len(parts)} columnas, se esperaban {n}. Datos: {str(parts[:5])[:100]}...") 
+                parts += ['0'] * (n - len(parts)) 
+                rows.append(parts[:n])
+            
+            if parse_warnings:
+                warning_message = f"Advertencias de formato en '{os.path.basename(filepath)}' (se rellenará con ceros):\n" + "\n".join(parse_warnings[:5]) 
+                if len(parse_warnings) > 5:
+                    warning_message += f"\n... y {len(parse_warnings)-5} advertencias más."
+                messagebox.showwarning("Advertencia de formato", warning_message)
+
+            if not rows:
+                messagebox.showerror("Error al leer", f"No hay filas de datos válidas en '{os.path.basename(filepath)}' después de la cabecera.")
+                return None
+
+            df = pd.DataFrame(rows, columns=header)
+
+            if 'Date' not in df.columns or 'Time' not in df.columns:
+                messagebox.showerror("Error al leer", "El archivo TXT debe contener las columnas 'Date' y 'Time'.")
+                return None
+
+            df['DateTime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%m/%d/%Y %I:%M:%S %p', errors='coerce')
+            
+            num_total_rows_df = len(df)
+            df.dropna(subset=['DateTime'], inplace=True)
+            num_valid_datetime = len(df)
+
+            if num_valid_datetime == 0 and num_total_rows_df > 0 :
+                 messagebox.showerror("Error de conversión de fecha", f"No se pudieron convertir las fechas y horas de ninguna fila en '{os.path.basename(filepath)}'. Verifique el formato (MM/DD/YYYY HH:MM:SS AM/PM).")
+                 return None
+            elif num_valid_datetime < num_total_rows_df:
+                 messagebox.showwarning("Advertencia de conversión de fecha",
+                                       f"{num_total_rows_df - num_valid_datetime} fila(s) en '{os.path.basename(filepath)}' no pudieron ser convertidas a fecha/hora y fueron omitidas.")
+
+            if df.empty : 
+                 messagebox.showerror("Error al leer", f"No hay datos válidos en '{os.path.basename(filepath)}' después de procesar fechas y horas.")
+                 return None
+
+            df.set_index('DateTime', inplace=True)
+            columns_to_drop = ['Date', 'Time']
+            for c_name in header: 
+                if c_name not in columns_to_drop and c_name in df.columns:
+                    try:
+                        df[c_name] = pd.to_numeric(df[c_name], errors='coerce')
+                        df[c_name] = df[c_name].fillna(0)
+                    except Exception as e_num:
+                        print(f"Advertencia: Problema convirtiendo la columna '{c_name}' a numérico: {e_num}. Se rellenará con 0.")
+                        df[c_name] = 0 
+            
+            return df.drop(columns=columns_to_drop, errors='ignore')
+
+        except FileNotFoundError:
+            messagebox.showerror("Error al leer", f"Archivo no encontrado: {filepath}")
+            return None
+        except Exception as e:
+            messagebox.showerror("Error al leer", f"Ocurrió un error inesperado al leer el archivo TXT '{os.path.basename(filepath)}': {str(e)}")
+            return None
+
+    def mostrar_grafico(self, data, start_dt, end_dt):
+        top = tk.Toplevel(self.root)
+
+        # Título de la ventana (barra superior)
+        top.title(
+            f"{os.path.basename(self.filepath)}  |  "
+            f"Datos {start_dt:%Y-%m-%d %H:%M} a {end_dt:%Y-%m-%d %H:%M}"
+        )
+
+        # (Opcional) título interno dentro de la ventana
+        ttk.Label(
+            top,
+            text=(
+                f"{os.path.basename(self.filepath)}  |  "
+                f"Datos {start_dt:%Y-%m-%d %H:%M} a {end_dt:%Y-%m-%d %H:%M}"
+            ),
+            font=("Helvetica", 12, "bold")
+        ).pack(pady=(6, 4))   # margen superior / inferior
+
+
+        vf = ttk.LabelFrame(top, text="Valores")
+        vf.pack(fill='x', padx=10, pady=5)
+        for j in range(5): 
+            vf.columnconfigure(j, weight=1)
+        hdrs = ["Registros", "Valor inicial (mmHg)", "Valor final (mmHg)", "Diferencia (mmHg)", "Estado"]
+        for j, h in enumerate(hdrs):
+            ttk.Label(vf, text=h, anchor='center', font=("Helvetica", 10, "bold")).grid(row=0, column=j, sticky='ew', padx=5, pady=2)
+
+        all_records_ok = True 
+
+        if data.empty:
+            ttk.Label(vf, text="No hay datos para mostrar en la tabla.").grid(row=1, column=0, columnspan=5, pady=10)
+            all_records_ok = False 
+        else:
+            fr_gui, lr_gui = data.iloc[0], data.iloc[-1]
+            for i, c_gui in enumerate(data.columns, start=1):
+                i0, i1 = fr_gui[c_gui], lr_gui[c_gui]
+                d_val = i1 - i0
+                s = '✗' if abs(d_val) > self.tolerance else '✓'
+                if s == '✗': 
+                    all_records_ok = False
+                clr = 'red' if abs(d_val) > self.tolerance else 'green'
+                vals = [c_gui, f"{i0:.2f}", f"{i1:.2f}", f"{d_val:.2f}", s]
+                for j_gui, v_text in enumerate(vals):
+                    cell_label = ttk.Label(vf, text=v_text, foreground=clr if j_gui == 4 else None, anchor='center')
+                    cell_label.grid(row=i, column=j_gui, sticky='ew', padx=5)
+        
+        if data.empty : 
+            overall_status_text = "NO OK"
+            overall_status_color = "red"
+        else: 
+            overall_status_text = "OK" if all_records_ok else "NO OK"
+            overall_status_color = "green" if all_records_ok else "red"
+        
+        overall_status_label = ttk.Label(top, text=overall_status_text, 
+                                         foreground=overall_status_color, 
+                                         font=("Helvetica", 14, "bold"), 
+                                         anchor='center')
+        overall_status_label.pack(pady=(10, 0)) 
+
+        info_text_gui_bottom = f"Límite tolerancia: {self.tolerance:.2f} unidades en {self.interval_minutes} minutos"
+        info_label_bottom = ttk.Label(top, text=info_text_gui_bottom, font=("Helvetica", 9, "italic"), justify=tk.CENTER)
+        info_label_bottom.pack(pady=(2, 10))
+
+        fig = Figure(figsize=(8, 5.5), dpi=100) 
+        ax = fig.add_subplot(111)
+
+        if data.empty: 
+            ax.text(0.5, 0.5, "No hay datos para graficar", ha='center', va='center', fontsize=12)
+        else:
+            fr_graph = data.iloc[0] if not data.empty else None 
+            if fr_graph is not None:
+                 rel = data.subtract(fr_graph) 
+                 for c_col_gui_graph in rel.columns: 
+                    ax.plot(rel.index, rel[c_col_gui_graph], label=c_col_gui_graph)
+            else: 
+                 ax.text(0.5, 0.5, "Error al preparar datos relativos", ha='center', va='center', fontsize=12, color='red')
+
+            # --- Add Positive Tolerance Line (GUI) ---
+            if self.tolerance > 0: 
+                ax.axhline(y=self.tolerance, color='red', linestyle='--', linewidth=1, label=f'Tolerancia (+{self.tolerance:.2f})')
+            # --- End Tolerance Line ---
+
+            ax.set_xlabel('DateTime')
+            ax.set_ylabel('Cambio respecto al inicio (mmHg)')
+            ax.set_title(f'Intervalo de {self.interval_minutes} minutos (inicio = 0)')
+            
+            num_data_cols_gui = len(data.columns) if not data.empty else 0
+            num_items_for_legend_gui = num_data_cols_gui
+            if self.tolerance > 0: # Solo una línea de tolerancia
+                num_items_for_legend_gui += 1
+
+            ncol_gui = 1 
+            if num_items_for_legend_gui > 0:
+                if num_items_for_legend_gui <= 4: 
+                    ncol_gui = math.ceil(num_items_for_legend_gui / 2) if num_items_for_legend_gui > 1 else 1
+                elif num_items_for_legend_gui <= 9: 
+                    ncol_gui = math.ceil(num_items_for_legend_gui / 3)
+                else: 
+                    ncol_gui = math.ceil(num_items_for_legend_gui / 3)
+                
+                if ncol_gui == 0: ncol_gui = 1
+                legend_rows_gui = math.ceil(num_items_for_legend_gui / ncol_gui)
+                
+                legend_y_offset = -0.18 
+                bottom_margin = 0.25    
+
+                if legend_rows_gui > 1: 
+                    legend_y_offset -= (legend_rows_gui - 1) * 0.07 
+                    bottom_margin += (legend_rows_gui - 1) * 0.07   
+
+                bottom_margin = min(bottom_margin, 0.45) 
+
+                ax.legend(loc='lower center', 
+                          bbox_to_anchor=(0.5, legend_y_offset), 
+                          ncol=ncol_gui, 
+                          fontsize=7.5, 
+                          frameon=False)
+                try:
+                    fig.subplots_adjust(bottom=bottom_margin)
+                except ValueError: 
+                    fig.subplots_adjust(bottom=0.25) 
+            
+        fig.autofmt_xdate(rotation=45, ha='right') 
+        canvas = FigureCanvasTkAgg(fig, master=top)
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+        canvas.draw()
+        
+    def generar_pdf(self, data, start_dt, end_dt):
+        if not self.output_pdf_path: 
+            messagebox.showerror('Error', 'La ruta del PDF de salida no se ha definido correctamente.')
+            return
+        try:
+            with PdfPages(self.output_pdf_path) as pdf:
+                fig = Figure(figsize=(8.5, 11), dpi=100) 
+                fig.suptitle(
+                    f"{os.path.basename(self.filepath)}  |  Datos {start_dt:%Y-%m-%d %H:%M} a {end_dt:%Y-%m-%d %H:%M}",
+                    y=0.97,        # vuelve a 0.97 si te queda demasiado arriba o abajo ajusta a 0.965/0.975
+                    fontsize=14
+                )
+                
+                gs = fig.add_gridspec(3, height_ratios=[6, 1.5, 12], hspace=0.1, top=0.93, bottom=0.10) 
+
+                ax_t = fig.add_subplot(gs[0]); ax_t.axis('off')
+
+                rows_pdf, cols_pdf = [], ['Registros', 'Valor inicial (mmHg)', "Valor final (mmHg)", "Diferencia (mmHg)", "Estado"]
+                all_records_ok_pdf = True 
+
+                if not data.empty:
+                    fr_pdf, lr_pdf = data.iloc[0], data.iloc[-1]
+                    for c_col_pdf in data.columns: 
+                        i0, i1 = fr_pdf[c_col_pdf], lr_pdf[c_col_pdf]
+                        d_val = i1 - i0
+                        s_pdf = '✗' if abs(d_val) > self.tolerance else '✓'
+                        if s_pdf == '✗': 
+                            all_records_ok_pdf = False
+                        rows_pdf.append([c_col_pdf, f"{i0:.2f}", f"{i1:.2f}", f"{d_val:.2f}", s_pdf])
+                else:
+                    rows_pdf.append(["N/A", "N/A", "N/A", "N/A", "No hay datos"])
+                    all_records_ok_pdf = False 
+
+                tbl = ax_t.table(cellText=rows_pdf, colLabels=cols_pdf, loc='center', cellLoc='center', colLoc='center')
+                tbl.auto_set_font_size(False); tbl.set_fontsize(8.5) 
+                tbl.scale(1, 1.55) 
+
+                ax_status = fig.add_subplot(gs[1]); ax_status.axis('off') 
+                
+                if data.empty : 
+                    overall_status_text_pdf = "NO OK"
+                    overall_status_color_pdf = "red"
+                else:
+                    overall_status_text_pdf = "OK" if all_records_ok_pdf else "NO OK"
+                    overall_status_color_pdf = "green" if all_records_ok_pdf else "red"
+
+                ax_status.text(0.5, 0.70, overall_status_text_pdf, 
+                               color=overall_status_color_pdf, 
+                               ha='center', va='center', fontsize=14, fontweight='bold', 
+                               transform=ax_status.transAxes) 
+
+                info_text_pdf_in_status = f"Límite tolerancia: {self.tolerance:.2f} unidades en {self.interval_minutes} minutos" 
+                ax_status.text(0.5, 0.25, info_text_pdf_in_status, 
+                               ha='center', va='center', fontsize=9, style='italic', color='black',
+                               transform=ax_status.transAxes)
+
+                ax_c = fig.add_subplot(gs[2]) 
+                if not data.empty:
+                    fr_pdf_graph = data.iloc[0] if not data.empty else None
+                    if fr_pdf_graph is not None:
+                        rel = data.subtract(fr_pdf_graph) 
+                        for c_col_pdf_chart in rel.columns: 
+                            ax_c.plot(rel.index, rel[c_col_pdf_chart], label=c_col_pdf_chart)
+                    else:
+                        ax_c.text(0.5, 0.5, "Error al preparar datos relativos", ha='center', va='center', fontsize=12, color='red')
+                    
+                    # --- Add Positive Tolerance Line (PDF) ---
+                    if self.tolerance > 0:
+                        ax_c.axhline(y=self.tolerance, color='red', linestyle='--', linewidth=1, label=f'Tolerancia (+{self.tolerance:.2f})')
+                    # --- End Tolerance Line ---
+                else:
+                    ax_c.text(0.5, 0.5, "No hay datos para graficar", ha='center', va='center', fontsize=12)
+
+                ax_c.set_xlabel('DateTime', fontsize=9)
+                ax_c.set_ylabel('Cambio respecto al inicio del intervalo (mmHg)', fontsize=9)
+                ax_c.set_title(f'Intervalo de {self.interval_minutes} minutos (inicio del intervalo = 0)', fontsize=11)
+                
+                num_data_cols_pdf = len(data.columns) if not data.empty else 0
+                num_items_for_legend_pdf = num_data_cols_pdf
+                if self.tolerance > 0: # Solo una línea de tolerancia
+                    num_items_for_legend_pdf += 1
+                
+                ncol_pdf = 1 
+                if num_items_for_legend_pdf > 0:
+                    if num_items_for_legend_pdf <= 4: 
+                        ncol_pdf = math.ceil(num_items_for_legend_pdf / 2) if num_items_for_legend_pdf > 1 else 1
+                    elif num_items_for_legend_pdf <= 9: 
+                        ncol_pdf = math.ceil(num_items_for_legend_pdf / 3)
+                    else: 
+                        ncol_pdf = math.ceil(num_items_for_legend_pdf / 3)
+                    
+                    if ncol_pdf == 0: ncol_pdf = 1
+                    legend_rows_pdf = math.ceil(num_items_for_legend_pdf / ncol_pdf)
+                    
+                    legend_y_anchor_pdf = -0.18 
+                    if legend_rows_pdf > 1: # Ajuste si la leyenda tiene más de 1 fila
+                        legend_y_anchor_pdf -= (legend_rows_pdf - 1) * 0.06 
+                    
+                    ax_c.legend(loc='lower center', bbox_to_anchor=(0.5, legend_y_anchor_pdf), ncol=ncol_pdf, fontsize=7.5, frameon=False) 
+                
+                ax_c.tick_params(axis='x', labelsize=8) 
+                ax_c.tick_params(axis='y', labelsize=8)
+                fig.autofmt_xdate(rotation=30, ha='right')
+
+                pdf.savefig(fig, bbox_inches='tight') 
+            messagebox.showinfo('Éxito', f'PDF guardado en:\n{self.output_pdf_path}')
+        except Exception as e:
+            messagebox.showerror('Error', f'No se pudo guardar el PDF: {e}\n Asegúrese que el archivo no esté abierto.')
+
+    def guardar_csv(self, data_interval):
+        if data_interval.empty:
+            return
+
+        df_to_save = data_interval.reset_index().copy()
+        nombre_ciclo = os.path.splitext(os.path.basename(self.filepath))[0]
+        tiempo_carga = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        original_signal_columns = list(data_interval.columns)
+
+        rows_for_df = []
+        for _, row_data in df_to_save.iterrows():
+            base_info = {
+                'nombre_ciclo': nombre_ciclo,
+                'nombre_registro': ",".join(original_signal_columns),
+                'tiempo': row_data['DateTime'],
+                'inicio_test_vacio': tiempo_carga
+            }
+            for i in range(12): 
+                if i < len(original_signal_columns):
+                    base_info[f'señal_{i + 1}'] = row_data[original_signal_columns[i]]
+                else:
+                    base_info[f'señal_{i + 1}'] = 0 
+            rows_for_df.append(base_info)
+
+        if not rows_for_df: 
+            return
+
+        df_formateado = pd.DataFrame(rows_for_df)
+        cols_order = ['nombre_ciclo', 'nombre_registro', 'tiempo', 'inicio_test_vacio'] + [f'señal_{i + 1}' for i in range(12)]
+        df_formateado = df_formateado.reindex(columns=cols_order, fill_value=0)
+
+        if not os.path.exists(self.output_dir):
+            try:
+                os.makedirs(self.output_dir)
+            except Exception as e:
+                messagebox.showerror('Error', f'No se pudo crear el directorio de salida para CSV: {e}')
+                return
+        try:
+            if os.path.exists(self.output_csv_path):
+                try:
+                    existing_df = pd.read_csv(self.output_csv_path)
+                    if 'tiempo' in existing_df.columns and not pd.api.types.is_datetime64_any_dtype(existing_df['tiempo']):
+                        existing_df['tiempo'] = pd.to_datetime(existing_df['tiempo'], errors='coerce')
+                except (FileNotFoundError, pd.errors.EmptyDataError): 
+                    existing_df = pd.DataFrame(columns=cols_order) 
+                except Exception as e_read: 
+                     messagebox.showerror('Error al leer CSV existente', f"No se pudo leer '{self.output_csv_path}': {e_read}\nSe intentará sobrescribir.")
+                     existing_df = pd.DataFrame(columns=cols_order)
+
+                existing_df = existing_df.reindex(columns=cols_order, fill_value=0)
+                
+                if 'tiempo' in df_formateado.columns and not pd.api.types.is_datetime64_any_dtype(df_formateado['tiempo']):
+                    df_formateado['tiempo'] = pd.to_datetime(df_formateado['tiempo'], errors='coerce')
+                
+                combined_df = pd.concat([existing_df, df_formateado], ignore_index=True)
+                combined_df.to_csv(self.output_csv_path, index=False, date_format='%Y-%m-%d %H:%M:%S')
+            else:
+                df_formateado.to_csv(self.output_csv_path, index=False, date_format='%Y-%m-%d %H:%M:%S')
+            messagebox.showinfo('Éxito', f'CSV guardado en:\n{self.output_csv_path}')
+        except PermissionError:
+             messagebox.showerror('Error de Permiso', f'No se pudo guardar/actualizar el archivo CSV ({os.path.basename(self.output_csv_path)}).\nAsegúrese que el archivo no esté abierto por otro programa y que tiene permisos de escritura.')
+        except Exception as e:
+            messagebox.showerror('Error', f'No se pudo guardar/actualizar el archivo CSV ({os.path.basename(self.output_csv_path)}): {e}')
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
